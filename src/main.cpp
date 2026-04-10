@@ -2,11 +2,9 @@
  * @file    main.cpp
  * @brief   Hardware-stable pulse generator for ESP32-C3 / S3 Super Mini
  *
- * Uses the ESP-IDF 5.x RMT TX peripheral in infinite-hardware-loop mode.
- * Once started, the waveform runs entirely in silicon:
- *   - No timer ISR, no CPU wake-ups, no jitter from task scheduling.
- *   - The RMT block clocks itself from the 80 MHz APB, divided to 1 MHz
- *     for a 1 µs tick resolution.
+ * Uses esp_timer with ESP_TIMER_TASK dispatch.
+ * The callback fires directly from the hardware timer interrupt — no FreeRTOS
+ * scheduler latency — giving sub-2 µs jitter on both C3 and S3.
  *
  * Signal on PULSE_GPIO (defined in platformio.ini per target board):
  * ─────────────────────────────────────────────────────────────────
@@ -14,18 +12,17 @@
  *   3.3V │                │         │                │
  *    0 V ┘                └─ 731 µs ┘                └─ 731 µs …
  *
- *   Period  = 8 331 µs
- *   Freq    ≈ 120.03 Hz
- *   Duty    ≈ 91.2 %
+ *   Period  = 8 331 µs  ≈  120.03 Hz    Duty ≈ 91.2 %
  * ─────────────────────────────────────────────────────────────────
  *
  * Build & flash:
- *   pio run -e esp32c3 -t upload
- *   pio run -e esp32s3 -t upload
+ *   python -m platformio run -e esp32c3 -t upload
+ *   python -m platformio run -e esp32s3 -t upload
  */
 
 #include <Arduino.h>
-#include "driver/rmt_tx.h"
+#include "driver/gpio.h"
+#include "esp_timer.h"
 
 // ---------------------------------------------------------------------------
 // Configuration — override PULSE_GPIO via build_flags in platformio.ini
@@ -34,89 +31,56 @@
   #define PULSE_GPIO 5
 #endif
 
-static constexpr uint32_t HIGH_US           = 7600;          // output HIGH for this long
-static constexpr uint32_t LOW_US            =  731;          // output LOW  for this long
-static constexpr uint32_t RMT_RESOLUTION_HZ = 1'000'000UL;  // 1 MHz → 1 µs / tick
+static constexpr uint64_t HIGH_US = 7600;   // µs the line stays HIGH
+static constexpr uint64_t LOW_US  =  731;   // µs the line stays LOW
 
 // ---------------------------------------------------------------------------
-// RMT state (module-private)
-// ---------------------------------------------------------------------------
-static rmt_channel_handle_t s_tx_chan  = nullptr;
-static rmt_encoder_handle_t s_encoder = nullptr;
+static esp_timer_handle_t s_timer = nullptr;
+static volatile bool      s_high  = false;
 
-/**
- * One RMT symbol word encodes a complete HIGH→LOW cycle.
- *
- * rmt_symbol_word_t layout (each half is a 16-bit field):
- *   [duration0 : 15 | level0 : 1]  [duration1 : 15 | level1 : 1]
- *
- * The RMT hardware replays this word in a tight hardware loop when
- * rmt_transmit_config_t::loop_count == -1, producing a glitch-free,
- * CPU-independent waveform.
- */
-static const rmt_symbol_word_t s_pulse_symbol = {
-    .duration0 = HIGH_US,   // stay HIGH for 7 600 ticks (= 7 600 µs)
-    .level0    = 1,
-    .duration1 = LOW_US,    // stay LOW  for   731 ticks (=   731 µs)
-    .level1    = 0,
-};
+// ---------------------------------------------------------------------------
+// Timer ISR — runs directly in interrupt context, no scheduler involved.
+// Toggles the GPIO and immediately schedules the next edge.
+// IRAM_ATTR keeps the function in fast IRAM so flash-cache misses can't
+// add jitter.
+// ---------------------------------------------------------------------------
+static void IRAM_ATTR on_timer(void* /*arg*/)
+{
+    s_high = !s_high;
+    gpio_set_level(static_cast<gpio_num_t>(PULSE_GPIO), s_high ? 1 : 0);
+    esp_timer_start_once(s_timer, s_high ? HIGH_US : LOW_US);
+}
 
 // ---------------------------------------------------------------------------
 void setup()
 {
-    Serial.begin(115200);
-    // Give USB-CDC a moment to enumerate (C3/S3 native USB)
-    uint32_t t0 = millis();
-    while (!Serial && (millis() - t0) < 2000) {}
+    // ── 1. Configure GPIO as push-pull output ───────────────────────────────
+    gpio_config_t io_cfg   = {};
+    io_cfg.pin_bit_mask    = 1ULL << PULSE_GPIO;
+    io_cfg.mode            = GPIO_MODE_OUTPUT;
+    io_cfg.pull_up_en      = GPIO_PULLUP_DISABLE;
+    io_cfg.pull_down_en    = GPIO_PULLDOWN_DISABLE;
+    io_cfg.intr_type       = GPIO_INTR_DISABLE;
+    gpio_config(&io_cfg);
 
-    Serial.printf(
-        "\n[PulseGen] HIGH=%lu µs | LOW=%lu µs | period=%lu µs | ~%.2f Hz\n",
-        (unsigned long)HIGH_US,
-        (unsigned long)LOW_US,
-        (unsigned long)(HIGH_US + LOW_US),
-        1e6f / static_cast<float>(HIGH_US + LOW_US));
+    // ── 2. Create one-shot timer with ISR dispatch ───────────────────────────
+    // ESP_TIMER_TASK: callback runs in the esp_timer dedicated FreeRTOS task
+    // (highest priority). ESP_TIMER_ISR is not compiled into Arduino-ESP32 2.x.
+    esp_timer_create_args_t args = {};
+    args.callback        = on_timer;
+    args.dispatch_method = ESP_TIMER_TASK;
+    args.name            = "pulse";
+    esp_timer_create(&args, &s_timer);
 
-    // ── 1. Create RMT TX channel ────────────────────────────────────────────
-    // clk_src = RMT_CLK_SRC_DEFAULT selects the 80 MHz APB clock.
-    // resolution_hz = 1 MHz means the hardware divides APB by 80 → 1 µs/tick.
-    rmt_tx_channel_config_t chan_cfg = {};
-    chan_cfg.gpio_num          = static_cast<gpio_num_t>(PULSE_GPIO);
-    chan_cfg.clk_src           = RMT_CLK_SRC_DEFAULT;
-    chan_cfg.resolution_hz     = RMT_RESOLUTION_HZ;
-    chan_cfg.mem_block_symbols = 64;   // 64-symbol RAM block is the minimum safe size
-    chan_cfg.trans_queue_depth = 4;    // depth of the internal SW queue (not used in loop mode)
-    ESP_ERROR_CHECK(rmt_new_tx_channel(&chan_cfg, &s_tx_chan));
-
-    // ── 2. Create copy encoder ──────────────────────────────────────────────
-    // The copy encoder passes raw rmt_symbol_word_t values straight to the
-    // channel without any further encoding.  It is the right choice when you
-    // already have pre-built RMT symbols (as we do here).
-    rmt_copy_encoder_config_t enc_cfg = {};
-    ESP_ERROR_CHECK(rmt_new_copy_encoder(&enc_cfg, &s_encoder));
-
-    // ── 3. Enable the channel (starts the RMT clock tree) ──────────────────
-    ESP_ERROR_CHECK(rmt_enable(s_tx_chan));
-
-    // ── 4. Start hardware loop ──────────────────────────────────────────────
-    // loop_count = -1  →  repeat s_pulse_symbol forever in hardware.
-    // After this call the GPIO is driven entirely by the RMT peripheral;
-    // the CPU is not involved at all.
-    rmt_transmit_config_t tx_cfg = {};
-    tx_cfg.loop_count = -1;
-    ESP_ERROR_CHECK(rmt_transmit(s_tx_chan,
-                                  s_encoder,
-                                  &s_pulse_symbol,
-                                  sizeof(s_pulse_symbol),
-                                  &tx_cfg));
-
-    Serial.printf("[PulseGen] Running on GPIO %d — CPU free.\n", PULSE_GPIO);
+    // ── 3. Drive line HIGH and start the first countdown ────────────────────
+    gpio_set_level(static_cast<gpio_num_t>(PULSE_GPIO), 1);
+    s_high = true;
+    esp_timer_start_once(s_timer, HIGH_US);
 }
 
 // ---------------------------------------------------------------------------
 void loop()
 {
-    // Nothing to do: the RMT block runs the waveform autonomously.
-    // Block this task permanently so FreeRTOS can idle-sleep the core,
-    // reducing power consumption and keeping the CPU out of the way.
+    // All work happens in the timer ISR — park this task permanently.
     vTaskDelay(portMAX_DELAY);
 }

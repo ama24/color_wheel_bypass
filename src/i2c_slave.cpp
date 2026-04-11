@@ -8,10 +8,10 @@
 //
 //  Two I2C controllers on the same physical bus (SK05 pins 6/7 = SCL/SDA):
 //
-//  I2C0  Wire  GPIO11/12  — address 0x4D  temperature sensor
-//  I2C1  Wire1 GPIO13/14  — address 0x41  fan-speed controller
+//  I2C0  Wire  GPIO10/12  — address 0x4D  temperature sensor
+//  I2C1  Wire1 GPIO11/13  — address 0x41  fan-speed controller
 //
-//  Hardware bridge required: GPIO13↔GPIO11 and GPIO14↔GPIO12 via jumper wires.
+//  Hardware bridge required: GPIO10↔GPIO11 and GPIO12↔GPIO13 via jumper wires.
 //  I2C is open-drain so both controllers sharing the physical bus is safe.
 //
 //  0x54 EEPROM: retain original IC, desolder from thermal board and wire
@@ -67,7 +67,8 @@ static void on_temp_request()
         default:   val = 0x00;         break;   // alert config / unknown regs
     }
     Wire.write(val);
-    ESP_LOGD(TAG, "0x4D reg 0x%02X → 0x%02X", s_temp_reg, val);
+    // NOTE: do not call ESP_LOG here — onRequest fires from the I2C ISR and
+    // ESP_LOGD acquires a mutex internally, which will panic in ISR context.
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ static void on_periph_receive(int /*n_bytes*/)
         s_periph_reg = (uint8_t)Wire1.read();
     }
     while (Wire1.available()) Wire1.read();
-    ESP_LOGD(TAG, "0x41 write reg 0x%02X", s_periph_reg);
+    // NOTE: no ESP_LOG here — ISR context, mutex not safe.
 }
 
 static void on_periph_request()

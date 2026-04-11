@@ -29,7 +29,7 @@
 // SK01 hardware-only signals (no GPIO)
 //   PRSV  (pin 13): 10 kΩ pull-up from V5P0LD (5 V) — presence detect
 //   V5P0LD(pin 11): power input to ESP32 via 3.3 V LDO (e.g. AMS1117-3.3)
-//   PHSENSE divider: 3.3 V → 10 kΩ → GPIO10 → 68 kΩ → GND → ~2.87 V at SK05 pin 1
+//   PHSENSE divider: 3.3 V → 10 kΩ → GPIO9 → 68 kΩ → GND → ~2.87 V at SK05 pin 1
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -80,13 +80,13 @@
 // SK05 I2C fan controller spoof (address 0x41)
 // Main board writes reg 0x01=0xF8 and reg 0x02=0xF8 every ~2 s (fan speed cmd).
 // No read requests observed — slave ACKs writes and returns 0x00 on any read.
-// Physical wiring: bridge GPIO13↔GPIO11 and GPIO14↔GPIO12 (I2C open-drain, safe).
+// Physical wiring: bridge GPIO10↔GPIO11 (SDA) and GPIO12↔GPIO13 (SCL) — dupont jumpers.
 // ---------------------------------------------------------------------------
 #define I2C_PERIPH_ADDR  0x41
 
 // ---------------------------------------------------------------------------
 // FreeRTOS task parameters
 // ---------------------------------------------------------------------------
-#define UART_TASK_STACK   4096
+#define UART_TASK_STACK   8192   // Serial.printf/vsnprintf needs ~400 B; 8 kB gives safe headroom
 #define UART_TASK_PRI       10
 #define UART_TASK_CORE       0

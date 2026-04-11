@@ -293,10 +293,12 @@ void uart_primary_init(SemaphoreHandle_t ldpcn_sem)
 {
     s_ldpcn_sem = ldpcn_sem;
 
-    // USB serial for debug output
+    // USB serial for debug output.
+    // Do NOT block waiting for USB enumeration — LDPCN fires ~3 s after
+    // projector power-on and we must not delay task creation past that point.
+    // When running without USB the output is silently discarded; connect a
+    // serial monitor after power-on to catch the boot log.
     Serial.begin(115200);
-    // Brief wait for USB CDC to enumerate on the host side
-    for (int i = 0; i < 30 && !Serial; i++) vTaskDelay(100 / portTICK_PERIOD_MS);
 
     // UART1: 19200 baud 8N1, TX=GP3 (RX0LD), RX=GP4 (TX0LD)
     Serial1.begin(PRIMARY_UART_BAUD, SERIAL_8N1, PIN_TX0LD_RX, PIN_RX0LD_TX);

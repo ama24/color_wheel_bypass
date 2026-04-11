@@ -91,15 +91,16 @@ static void IRAM_ATTR ldup_cb(void* /*arg*/)
 {
     if (!s_ldup_active) return;
 
-    gpio_set_level(static_cast<gpio_num_t>(PIN_LDUP), LDUP_LEVEL[s_ldup_phase]);
-
-    // Advance phase: after phase 7 wrap back to phase 2 (repeating loop)
+    // Advance to the next phase FIRST, then drive the GPIO and schedule its
+    // duration.  The timer that fired was for the phase we just finished;
+    // we now enter the next one.
     if (s_ldup_phase == 7) {
-        s_ldup_phase = 2;
+        s_ldup_phase = 2;   // wrap: repeating loop restarts at phase 2
     } else {
         s_ldup_phase++;
     }
 
+    gpio_set_level(static_cast<gpio_num_t>(PIN_LDUP), LDUP_LEVEL[s_ldup_phase]);
     esp_timer_start_once(s_ldup_timer, LDUP_PHASE_US[s_ldup_phase]);
 }
 

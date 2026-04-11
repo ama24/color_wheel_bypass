@@ -1,86 +1,86 @@
 /**
  * @file    main.cpp
- * @brief   Hardware-stable pulse generator for ESP32-C3 / S3 Super Mini
+ * @brief   DLP Projector Spoofer — ESP32-S3 Super Mini
  *
- * Uses esp_timer with ESP_TIMER_TASK dispatch.
- * The callback fires directly from the hardware timer interrupt — no FreeRTOS
- * scheduler latency — giving sub-2 µs jitter on both C3 and S3.
+ * Emulates the light source control PCB (SK01) and I2C temperature sensor
+ * (SK05) of a DLP projector to allow the original light engine to be replaced
+ * with a TTL-controlled 405 nm UV laser for photolithography.
  *
- * Signal on PULSE_GPIO (defined in platformio.ini per target board):
- * ─────────────────────────────────────────────────────────────────
- *        ┌─── 7 600 µs ───┐         ┌─── 7 600 µs ───┐
- *   3.3V │                │         │                │
- *    0 V ┘                └─ 731 µs ┘                └─ 731 µs …
+ * Subsystems spoofed:
+ *   SK01 — 13-pin control PCB connector
+ *     PRSV    : hardware pull-up (10 kΩ to V5P0LD) — no GPIO
+ *     SENS    : ~120 Hz colour-wheel index pulse (GPIO5, esp_timer)
+ *     LDUP    : multi-phase light-output PWM (GPIO8, esp_timer)
+ *     LLITZ   : intensity reference HIGH (GPIO7, driven from Task A)
+ *     PHSENSE : photo sense stub ~2.87 V (GPIO10 via resistor divider)
+ *     RX0LD   : full UART replay at 19200 baud 8N1 (UART1 TX, GPIO15)
+ *     TX0LD   : receive main-board commands (UART1 RX, GPIO16)
  *
- *   Period  = 8 331 µs  ≈  120.03 Hz    Duty ≈ 91.2 %
- * ─────────────────────────────────────────────────────────────────
+ *   SK05 — 20-pin thermal board connector
+ *     I2C 0x4D : temperature sensor emulation (GPIO35/36)
+ *                Physical mod: remove 0x4D IC, wire ESP32 SDA/SCL in its place.
+ *                Keep EEPROM (0x54) and 0x41 peripheral on thermal board.
  *
- * Build & flash:
- *   python -m platformio run -e esp32c3 -t upload
- *   python -m platformio run -e esp32s3 -t upload
+ * Build: VS Code PlatformIO → esp32s3 → Build / Upload
  */
 
 #include <Arduino.h>
+#include "config.h"
+#include "signals.h"
+#include "uart_primary.h"
+#include "i2c_slave.h"
 #include "driver/gpio.h"
-#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+
+static const char* TAG = "main";
+
+// Binary semaphore: given by LDPCN ISR, taken by uart_primary task
+static SemaphoreHandle_t s_ldpcn_sem = nullptr;
 
 // ---------------------------------------------------------------------------
-// Configuration — override PULSE_GPIO via build_flags in platformio.ini
+// LDPCN ISR — fires on rising edge of SK01 pin 4
+// Wakes the UART task without scheduler latency.
 // ---------------------------------------------------------------------------
-#ifndef PULSE_GPIO
-  #define PULSE_GPIO 5
-#endif
-
-static constexpr uint64_t HIGH_US = 7600;   // µs the line stays HIGH
-static constexpr uint64_t LOW_US  =  731;   // µs the line stays LOW
-
-// ---------------------------------------------------------------------------
-static esp_timer_handle_t s_timer = nullptr;
-static volatile bool      s_high  = false;
-
-// ---------------------------------------------------------------------------
-// Timer ISR — runs directly in interrupt context, no scheduler involved.
-// Toggles the GPIO and immediately schedules the next edge.
-// IRAM_ATTR keeps the function in fast IRAM so flash-cache misses can't
-// add jitter.
-// ---------------------------------------------------------------------------
-static void IRAM_ATTR on_timer(void* /*arg*/)
+static void IRAM_ATTR ldpcn_isr(void* /*arg*/)
 {
-    s_high = !s_high;
-    gpio_set_level(static_cast<gpio_num_t>(PULSE_GPIO), s_high ? 1 : 0);
-    esp_timer_start_once(s_timer, s_high ? HIGH_US : LOW_US);
+    BaseType_t higher_prio_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_ldpcn_sem, &higher_prio_woken);
+    if (higher_prio_woken) portYIELD_FROM_ISR();
 }
 
 // ---------------------------------------------------------------------------
 void setup()
 {
-    // ── 1. Configure GPIO as push-pull output ───────────────────────────────
-    gpio_config_t io_cfg   = {};
-    io_cfg.pin_bit_mask    = 1ULL << PULSE_GPIO;
-    io_cfg.mode            = GPIO_MODE_OUTPUT;
-    io_cfg.pull_up_en      = GPIO_PULLUP_DISABLE;
-    io_cfg.pull_down_en    = GPIO_PULLDOWN_DISABLE;
-    io_cfg.intr_type       = GPIO_INTR_DISABLE;
-    gpio_config(&io_cfg);
+    // ── 1. LDPCN input with rising-edge interrupt ────────────────────────
+    gpio_config_t ldpcn_cfg   = {};
+    ldpcn_cfg.pin_bit_mask    = 1ULL << PIN_LDPCN;
+    ldpcn_cfg.mode            = GPIO_MODE_INPUT;
+    ldpcn_cfg.pull_up_en      = GPIO_PULLUP_DISABLE;
+    ldpcn_cfg.pull_down_en    = GPIO_PULLDOWN_ENABLE;  // pull LOW when idle
+    ldpcn_cfg.intr_type       = GPIO_INTR_POSEDGE;
+    gpio_config(&ldpcn_cfg);
 
-    // ── 2. Create one-shot timer with ISR dispatch ───────────────────────────
-    // ESP_TIMER_TASK: callback runs in the esp_timer dedicated FreeRTOS task
-    // (highest priority). ESP_TIMER_ISR is not compiled into Arduino-ESP32 2.x.
-    esp_timer_create_args_t args = {};
-    args.callback        = on_timer;
-    args.dispatch_method = ESP_TIMER_TASK;
-    args.name            = "pulse";
-    esp_timer_create(&args, &s_timer);
+    // ── 2. Create RTOS primitives ────────────────────────────────────────
+    s_ldpcn_sem = xSemaphoreCreateBinary();
 
-    // ── 3. Drive line HIGH and start the first countdown ────────────────────
-    gpio_set_level(static_cast<gpio_num_t>(PULSE_GPIO), 1);
-    s_high = true;
-    esp_timer_start_once(s_timer, HIGH_US);
+    // ── 3. Install GPIO ISR service and attach LDPCN handler ────────────
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(static_cast<gpio_num_t>(PIN_LDPCN), ldpcn_isr, nullptr);
+
+    // ── 4. Start I2C slave (0x4D temperature sensor emulation) ──────────
+    i2c_slave_init();
+
+    // ── 5. Spawn UART primary task (Core 0) ─────────────────────────────
+    uart_primary_init(s_ldpcn_sem);
+
+    ESP_LOGI(TAG, "Spoofer ready — waiting for LDPCN HIGH");
 }
 
 // ---------------------------------------------------------------------------
 void loop()
 {
-    // All work happens in the timer ISR — park this task permanently.
+    // All work happens in the UART task and ISR/timer callbacks.
     vTaskDelay(portMAX_DELAY);
 }

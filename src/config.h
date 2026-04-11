@@ -14,11 +14,15 @@
 #define PIN_LDPCN         6    // SK01 pin 4  — light driver enable input from main board
 #define PIN_LLITZ         7    // SK01 pin 9  — intensity reference (direction TBD — probe first)
 #define PIN_LDUP          8    // SK01 pin 10 — light output PWM (direction TBD — probe first)
-#define PIN_RX0LD_TX     15    // SK01 pin 6  — UART1 TX: spoofer → main board
-#define PIN_TX0LD_RX     16    // SK01 pin 7  — UART1 RX: main board → spoofer
-#define PIN_PHSENSE      10    // SK05 pin 1  — photo sense analogue stub (drive HIGH via divider)
-#define PIN_I2C_SDA      11    // SK05 pin 7  — I2C data  (slave at 0x4D)
-#define PIN_I2C_SCL      12    // SK05 pin 6  — I2C clock (slave at 0x4D)
+#define PIN_RX0LD_TX      3    // SK01 pin 6  — UART1 TX: spoofer → main board
+#define PIN_TX0LD_RX      4    // SK01 pin 7  — UART1 RX: main board → spoofer
+#define PIN_I2C_SDA      10    // SK05 pin 7  — I2C0 SDA (slave 0x4D) ┐ dupont jumper
+#define PIN_I2C1_SDA     11    // SK05 pin 7  — I2C1 SDA (slave 0x41) ┘ bridges 10↔11
+#define PIN_I2C_SCL      12    // SK05 pin 6  — I2C0 SCL (slave 0x4D) ┐ dupont jumper
+#define PIN_I2C1_SCL     13    // SK05 pin 6  — I2C1 SCL (slave 0x41) ┘ bridges 12↔13
+#define PIN_PHSENSE       9    // SK05 pin 1  — photo sense analogue stub (drive HIGH via divider)
+#define PIN_FG1           1    // SK05 pin 18 — fan tach 1 output (drive LOW; main board does not read)
+#define PIN_FG2           2    // SK05 pin 19 — fan tach 2 output (drive LOW; main board does not read)
 // NOTE: GPIO35/36 are tied to onboard PSRAM on ESP32-S3FH4R2 — do NOT use them.
 
 // ---------------------------------------------------------------------------
@@ -71,6 +75,14 @@
 #define TEMP_CH2_MSB    0x2F   // 47 °C — secondary board area
 #define TEMP_CH3_MSB    0x4A   // 74 °C — laser heatsink  ← NEVER 0xFF
 #define TEMP_CH4_MSB    0x2E   // 46 °C — UV source area
+
+// ---------------------------------------------------------------------------
+// SK05 I2C fan controller spoof (address 0x41)
+// Main board writes reg 0x01=0xF8 and reg 0x02=0xF8 every ~2 s (fan speed cmd).
+// No read requests observed — slave ACKs writes and returns 0x00 on any read.
+// Physical wiring: bridge GPIO13↔GPIO11 and GPIO14↔GPIO12 (I2C open-drain, safe).
+// ---------------------------------------------------------------------------
+#define I2C_PERIPH_ADDR  0x41
 
 // ---------------------------------------------------------------------------
 // FreeRTOS task parameters

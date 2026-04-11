@@ -16,10 +16,11 @@
  *     RX0LD   : full UART replay at 19200 baud 8N1 (UART1 TX, GPIO15)
  *     TX0LD   : receive main-board commands (UART1 RX, GPIO16)
  *
- *   SK05 — 20-pin thermal board connector
- *     I2C 0x4D : temperature sensor emulation (GPIO35/36)
- *                Physical mod: remove 0x4D IC, wire ESP32 SDA/SCL in its place.
- *                Keep EEPROM (0x54) and 0x41 peripheral on thermal board.
+ *   SK05 — 20-pin thermal board (fully removed)
+ *     I2C 0x4D : temperature sensor emulation (I2C0 GPIO11/12)
+ *     I2C 0x41 : fan controller emulation    (I2C1 GPIO13/14 bridged to GPIO11/12)
+ *     I2C 0x54 : EEPROM — original IC kept, wired standalone to GPIO11/12
+ *     FG1/FG2  : fan tachometer outputs driven LOW (GPIO1/2)
  *
  * Build: VS Code PlatformIO → esp32s3 → Build / Upload
  */
@@ -69,10 +70,23 @@ void setup()
     gpio_install_isr_service(0);
     gpio_isr_handler_add(static_cast<gpio_num_t>(PIN_LDPCN), ldpcn_isr, nullptr);
 
-    // ── 4. Start I2C slave (0x4D temperature sensor emulation) ──────────
+    // ── 4. FG1/FG2 — fan tachometer outputs, drive LOW ──────────────────
+    // Main board does not read tachometer signals (confirmed from captures).
+    // Drive LOW to avoid floating-pin noise on SK05 pins 18/19.
+    gpio_config_t fg_cfg   = {};
+    fg_cfg.pin_bit_mask    = (1ULL << PIN_FG1) | (1ULL << PIN_FG2);
+    fg_cfg.mode            = GPIO_MODE_OUTPUT;
+    fg_cfg.pull_up_en      = GPIO_PULLUP_DISABLE;
+    fg_cfg.pull_down_en    = GPIO_PULLDOWN_DISABLE;
+    fg_cfg.intr_type       = GPIO_INTR_DISABLE;
+    gpio_config(&fg_cfg);
+    gpio_set_level(static_cast<gpio_num_t>(PIN_FG1), 0);
+    gpio_set_level(static_cast<gpio_num_t>(PIN_FG2), 0);
+
+    // ── 5. Start I2C slaves (0x4D temp sensor + 0x41 fan controller) ────
     i2c_slave_init();
 
-    // ── 5. Spawn UART primary task (Core 0) ─────────────────────────────
+    // ── 6. Spawn UART primary task (Core 0) ─────────────────────────────
     uart_primary_init(s_ldpcn_sem);
 
     ESP_LOGI(TAG, "Spoofer ready — waiting for LDPCN HIGH");

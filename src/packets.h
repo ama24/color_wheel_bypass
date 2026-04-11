@@ -1,22 +1,81 @@
 #pragma once
 #include <stdint.h>
+#include <string.h>
 
 // ===========================================================================
-//  packets.h — Full UART packet sequences for SK01 spoofer
-//  Source: nominal boot capture, DLP projector reverse engineering
+//  packets.h — Full UART packet tables for SK01 spoofer
 //
-//  RX0LD: spoofer transmits these (control PCB → main board)  — 45 entries
-//  TX0LD: main board transmits these (reference only)         — not stored
+//  RX0LD: spoofer transmits (ESP32 → main board)   — 45 entries, indices 0–44
+//  TX0LD: main board transmits (main board → ESP32) — patterns for matching
 //
-//  CRITICAL: Never send any packet containing the byte sequence 0x88 0x0F.
-//  That is the fault telemetry pattern — it triggers projector shutdown.
+//  CRITICAL: Never send any packet containing 0x88 0x0F.
+//  That is the fault telemetry pattern — triggers projector shutdown.
 // ===========================================================================
 
+
+// ===========================================================================
+//  TX0LD — patterns received FROM the main board
+//  Used for content-based matching so the spoofer always sends the correct
+//  reply regardless of packet ordering or repetition.
+// ===========================================================================
+
+// Match entry: compare first pat_len bytes of the incoming packet.
+// rx_idx: index into RX_TABLE to send.
+// rx_idx == 0xFF means "send next telemetry packet" (advance telem counter).
+struct TxMatch {
+    const uint8_t* pat;
+    uint8_t        pat_len;
+    uint8_t        rx_idx;
+    const char*    label;
+};
+
 // ---------------------------------------------------------------------------
-// RX0LD sequence — spoofer transmits (indices 0–44)
-// Replay in order: 0=announce, 1–6=init, 7–37=telemetry, 38–43=steady(×6), 44=shutdown
-// After index 43, lock permanently to RX_STEADY for all subsequent polls.
+// Init phase queries (sent once during boot, in this order)
 // ---------------------------------------------------------------------------
+static const uint8_t TX_DEVICE_QUERY[]  = {0x03, 0x01, 0x9D};   // device ID query
+static const uint8_t TX_CONFIG_READ[]   = {0x03, 0x01, 0x11};   // config register read
+static const uint8_t TX_MULTI_WRITE[]   = {0x03, 0x03};         // multi-register write
+static const uint8_t TX_STATUS_READ[]   = {0x03, 0x01, 0x90};   // status register read
+static const uint8_t TX_CAL_WRITE_1[]   = {0x03, 0x02, 0xA3};   // calibration write #1
+static const uint8_t TX_CAL_WRITE_2[]   = {0x03, 0x02, 0xB5};   // calibration write #2
+
+static const TxMatch TX_INIT_TABLE[] = {
+    { TX_DEVICE_QUERY, 3, 1, "device query"  },
+    { TX_CONFIG_READ,  3, 2, "config read"   },
+    { TX_MULTI_WRITE,  2, 3, "multi-write"   },
+    { TX_STATUS_READ,  3, 4, "status read"   },
+    { TX_CAL_WRITE_1,  3, 5, "cal write 1"  },
+    { TX_CAL_WRITE_2,  3, 6, "cal write 2"  },
+};
+static const uint8_t TX_INIT_TABLE_LEN = 6;
+
+// ---------------------------------------------------------------------------
+// Steady-state poll variants (~490 ms interval)
+// rx_idx 0xFF = send next telemetry; 11 = heartbeat echo (special)
+// ---------------------------------------------------------------------------
+static const uint8_t TX_HEARTBEAT[]    = {0x03, 0x20, 0xD3, 0x95, 0xF0};
+static const uint8_t TX_POLL_A[]       = {0x03, 0x01, 0x04, 0x3E, 0x30};
+static const uint8_t TX_POLL_B[]       = {0x03, 0x01, 0x04, 0x3E, 0xFE};
+static const uint8_t TX_POLL_C[]       = {0x03, 0x01, 0x04, 0x82, 0xFE};
+static const uint8_t TX_STATUS_SS[]    = {0x03, 0x01, 0x90, 0x82, 0xFE};
+static const uint8_t TX_EXT_STATUS[]   = {0x03, 0x40, 0x90, 0x82, 0xFE};
+static const uint8_t TX_SHUTDOWN[]     = {0x02, 0x00};
+static const uint8_t TX_SHUTDOWN_ABN[] = {0x00, 0x00};
+
+static const TxMatch TX_STEADY_TABLE[] = {
+    { TX_HEARTBEAT,   5, 11,   "heartbeat"    },  // rx_idx 11 = echo
+    { TX_POLL_A,      5, 0xFF, "poll A"       },
+    { TX_POLL_B,      5, 0xFF, "poll B"       },
+    { TX_POLL_C,      5, 0xFF, "poll C"       },
+    { TX_STATUS_SS,   5, 0xFF, "status read"  },
+    { TX_EXT_STATUS,  5, 0xFF, "ext status"   },
+};
+static const uint8_t TX_STEADY_TABLE_LEN = 6;
+
+
+// ===========================================================================
+//  RX0LD — spoofer transmits (indices 0–44)
+// ===========================================================================
 
 // [0] Proactive announce — sent immediately on LDPCN rising edge
 static const uint8_t RX_SEQ_0[]  = {0x03,0x40,0x08,0xF0};                                                   // 4
@@ -39,12 +98,12 @@ static const uint8_t RX_SEQ_5[]  = {0x03,0xA0,0xC3,0x24,0xF8};                  
 // [6] Init complete ACK
 static const uint8_t RX_SEQ_6[]  = {0x03,0x20,0x6D,0x2A,0xB2};                                             // 5
 
-// [7–37] Telemetry packets — unique per poll cycle
+// [7–37] Unique telemetry packets
 static const uint8_t RX_SEQ_7[]  = {0x03,0xC8,0x85,0x30,0x00,0xA5,0x48,0x6A,0x97,0x43,0xD4,0xFF};         // 12
 static const uint8_t RX_SEQ_8[]  = {0x03,0x08,0xA6,0x30,0x00,0x4A,0xE8,0x6A,0x94,0x43,0x51,0xE8};         // 12
 static const uint8_t RX_SEQ_9[]  = {0x03,0x28,0xD2,0x02,0x00,0xA9,0x2C,0x43,0x59,0x28,0x0D};              // 11
 static const uint8_t RX_SEQ_10[] = {0x03,0xA8,0xE7,0x30,0x00,0xA9,0x28,0x43,0xD6,0x02,0x43};              // 11
-static const uint8_t RX_SEQ_11[] = {0x03,0x20,0xD3,0x95,0xF0};                                             // 5  (heartbeat echo — in sequence)
+static const uint8_t RX_SEQ_11[] = {0x03,0x20,0xD3,0x95,0xF0};                                             // 5  ← heartbeat echo
 static const uint8_t RX_SEQ_12[] = {0x03,0xA8,0x69,0x02,0x00,0xA9,0x27,0x43,0x59,0x28,0x0D};              // 11
 static const uint8_t RX_SEQ_13[] = {0x03,0xE8,0xAE,0x02,0x00,0xA4,0x88,0x6A,0x91,0x43,0x1F,0xE8};         // 12
 static const uint8_t RX_SEQ_14[] = {0x03,0xC8,0x7D,0x30,0x00,0xD4,0x24,0x43,0xAC,0xEE,0xE8};              // 11
@@ -72,114 +131,86 @@ static const uint8_t RX_SEQ_35[] = {0x03,0x48,0x79,0x30,0x00,0x0C,0x3C,0x88,0x6A
 static const uint8_t RX_SEQ_36[] = {0x03,0x88,0x52,0x30,0x00,0x1F,0xE8,0xC7,0x28,0x43,0x63,0xFF};         // 12
 static const uint8_t RX_SEQ_37[] = {0x03,0x28,0xA9,0x30,0x00,0x7D,0xA8,0xC7,0x24,0x43,0x37,0xE8};         // 12
 
-// [38–43] Steady-state lock — 6 identical packets, then loop on RX_STEADY forever
-// These six entries in the table point to RX_STEADY for convenient indexing.
+// Steady-state lock (sent for all polls once unique telemetry is exhausted)
+static const uint8_t RX_STEADY[]   = {0x03,0x48,0x09,0x02,0x00,0x1F,0x08,0x0C,0x6A,0xBD,0xE8,0xFF};       // 12
 
-// Steady-state healthy telemetry (sent for all polls once locked)
-static const uint8_t RX_STEADY[] = {0x03,0x48,0x09,0x02,0x00,0x1F,0x08,0x0C,0x6A,0xBD,0xE8,0xFF};         // 12
-
-// [44] Graceful shutdown ACK
+// Shutdown ACK
 static const uint8_t RX_SHUTDOWN[] = {0x01};                                                                 // 1
 
 // ---------------------------------------------------------------------------
-// Lookup tables — pointer + length, indexed 0–44
-// Indices 38–43 all point to RX_STEADY.
+// Lookup tables — pointer + length + label, indexed 0–44
 // ---------------------------------------------------------------------------
 static const uint8_t * const RX_TABLE[] = {
-    RX_SEQ_0,   // 0  — announce
-    RX_SEQ_1,   // 1  — device ID
-    RX_SEQ_2,   // 2  — config ACK
-    RX_SEQ_3,   // 3  — multi-reg ACK
-    RX_SEQ_4,   // 4  — cal data
-    RX_SEQ_5,   // 5  — cal ACK
-    RX_SEQ_6,   // 6  — init complete
-    RX_SEQ_7,   // 7
-    RX_SEQ_8,   // 8
-    RX_SEQ_9,   // 9
-    RX_SEQ_10,  // 10
-    RX_SEQ_11,  // 11 — heartbeat echo
-    RX_SEQ_12,  // 12
-    RX_SEQ_13,  // 13
-    RX_SEQ_14,  // 14
-    RX_SEQ_15,  // 15
-    RX_SEQ_16,  // 16
-    RX_SEQ_17,  // 17
-    RX_SEQ_18,  // 18
-    RX_SEQ_19,  // 19
-    RX_SEQ_20,  // 20
-    RX_SEQ_21,  // 21
-    RX_SEQ_22,  // 22
-    RX_SEQ_23,  // 23
-    RX_SEQ_24,  // 24
-    RX_SEQ_25,  // 25
-    RX_SEQ_26,  // 26
-    RX_SEQ_27,  // 27
-    RX_SEQ_28,  // 28
-    RX_SEQ_29,  // 29
-    RX_SEQ_30,  // 30
-    RX_SEQ_31,  // 31
-    RX_SEQ_32,  // 32
-    RX_SEQ_33,  // 33
-    RX_SEQ_34,  // 34
-    RX_SEQ_35,  // 35
-    RX_SEQ_36,  // 36
-    RX_SEQ_37,  // 37
-    RX_STEADY,  // 38 — steady-state lock begins
-    RX_STEADY,  // 39
-    RX_STEADY,  // 40
-    RX_STEADY,  // 41
-    RX_STEADY,  // 42
-    RX_STEADY,  // 43
-    RX_SHUTDOWN // 44 — shutdown ACK
+    RX_SEQ_0,   RX_SEQ_1,   RX_SEQ_2,   RX_SEQ_3,   RX_SEQ_4,
+    RX_SEQ_5,   RX_SEQ_6,   RX_SEQ_7,   RX_SEQ_8,   RX_SEQ_9,
+    RX_SEQ_10,  RX_SEQ_11,  RX_SEQ_12,  RX_SEQ_13,  RX_SEQ_14,
+    RX_SEQ_15,  RX_SEQ_16,  RX_SEQ_17,  RX_SEQ_18,  RX_SEQ_19,
+    RX_SEQ_20,  RX_SEQ_21,  RX_SEQ_22,  RX_SEQ_23,  RX_SEQ_24,
+    RX_SEQ_25,  RX_SEQ_26,  RX_SEQ_27,  RX_SEQ_28,  RX_SEQ_29,
+    RX_SEQ_30,  RX_SEQ_31,  RX_SEQ_32,  RX_SEQ_33,  RX_SEQ_34,
+    RX_SEQ_35,  RX_SEQ_36,  RX_SEQ_37,
+    RX_STEADY,  RX_STEADY,  RX_STEADY,              // 38–40
+    RX_STEADY,  RX_STEADY,  RX_STEADY,              // 41–43
+    RX_SHUTDOWN                                      // 44
 };
 
 static const uint8_t RX_LENS[] = {
-     4,  // 0
-    10,  // 1
-     4,  // 2
-     6,  // 3
-    13,  // 4
-     5,  // 5
-     5,  // 6
-    12,  // 7
-    12,  // 8
-    11,  // 9
-    11,  // 10
-     5,  // 11
-    11,  // 12
-    12,  // 13
-    11,  // 14
-    11,  // 15
-    12,  // 16
-    11,  // 17
-    11,  // 18
-    11,  // 19
-    12,  // 20
-    12,  // 21
-    11,  // 22
-    12,  // 23
-    12,  // 24
-    12,  // 25
-    11,  // 26
-    11,  // 27
-    11,  // 28
-    11,  // 29
-    11,  // 30
-    11,  // 31
-    11,  // 32
-    11,  // 33
-    11,  // 34
-    11,  // 35
-    12,  // 36
-    12,  // 37
-    12,  // 38
-    12,  // 39
-    12,  // 40
-    12,  // 41
-    12,  // 42
-    12,  // 43
-     1,  // 44
+     4, 10,  4,  6, 13,  5,  5,                     // 0–6
+    12, 12, 11, 11,  5, 11, 12, 11, 11, 12, 11, 11, // 7–18
+    11, 12, 12, 11, 12, 12, 12, 11, 11, 11, 11, 11, // 19–30
+    11, 11, 11, 11, 11, 12, 12,                      // 31–37
+    12, 12, 12, 12, 12, 12,                          // 38–43
+     1,                                              // 44
 };
 
-static_assert(sizeof(RX_TABLE) / sizeof(RX_TABLE[0]) == 45, "RX_TABLE must have 45 entries");
-static_assert(sizeof(RX_LENS)  / sizeof(RX_LENS[0])  == 45, "RX_LENS must have 45 entries");
+static const char* const RX_LABELS[] = {
+    "announce",        // 0
+    "device ID",       // 1
+    "config ACK",      // 2
+    "multi-reg ACK",   // 3
+    "cal data",        // 4
+    "cal ACK",         // 5
+    "init complete",   // 6
+    "telemetry #7",    // 7
+    "telemetry #8",    // 8
+    "telemetry #9",    // 9
+    "telemetry #10",   // 10
+    "heartbeat echo",  // 11
+    "telemetry #12",   // 12
+    "telemetry #13",   // 13
+    "telemetry #14",   // 14
+    "telemetry #15",   // 15
+    "telemetry #16",   // 16
+    "telemetry #17",   // 17
+    "telemetry #18",   // 18
+    "telemetry #19",   // 19
+    "telemetry #20",   // 20
+    "telemetry #21",   // 21
+    "telemetry #22",   // 22
+    "telemetry #23",   // 23
+    "telemetry #24",   // 24
+    "telemetry #25",   // 25
+    "telemetry #26",   // 26
+    "telemetry #27",   // 27
+    "telemetry #28",   // 28
+    "telemetry #29",   // 29
+    "telemetry #30",   // 30
+    "telemetry #31",   // 31
+    "telemetry #32",   // 32
+    "telemetry #33",   // 33
+    "telemetry #34",   // 34
+    "telemetry #35",   // 35
+    "telemetry #36",   // 36
+    "telemetry #37",   // 37
+    "steady",          // 38
+    "steady",          // 39
+    "steady",          // 40
+    "steady",          // 41
+    "steady",          // 42
+    "steady",          // 43
+    "shutdown ACK",    // 44
+};
+
+static_assert(sizeof(RX_TABLE)  / sizeof(RX_TABLE[0])  == 45, "RX_TABLE must have 45 entries");
+static_assert(sizeof(RX_LENS)   / sizeof(RX_LENS[0])   == 45, "RX_LENS must have 45 entries");
+static_assert(sizeof(RX_LABELS) / sizeof(RX_LABELS[0]) == 45, "RX_LABELS must have 45 entries");

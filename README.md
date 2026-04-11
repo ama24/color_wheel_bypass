@@ -2,136 +2,207 @@
 
 Firmware for converting a commercial DLP projector into a **direct laser imaging (DLI) system** for UV photolithography. The original light engine (UV lamp, red laser, colour wheel) is removed and replaced with a TTL-controlled 405 nm UV laser. The DMD and main board are retained as a programmable spatial light modulator.
 
-The projector's main board continuously monitors two subsystems and shuts down within seconds if either goes silent or reports a fault. This firmware runs on an **ESP32-S3 Super Mini** and emulates both subsystems simultaneously, keeping the main board in normal operating state indefinitely.
+The projector's main board continuously monitors two subsystems and shuts down within seconds if either reports a fault. This firmware runs on an **ESP32-S3 Super Mini** and emulates both subsystems simultaneously, keeping the main board in normal operating state indefinitely.
 
 ---
 
-## How It Works
+## System Architecture
 
-### What the main board monitors
+The projector contains five connectors linking the main board, light source control PCB, colour wheel, red laser, power supply, and thermal management board.
 
-| Connector | Subsystem | Failure mode |
-|-----------|-----------|--------------|
-| **SK01** (13-pin) | Light source control PCB — UART 19200 baud + analogue signals | Shutdown within ~5 s if silent |
-| **SK05** (20-pin) | Thermal management board — I2C temperature sensor + fan controller | Shutdown within ~10 s if Ch3 temp returns 0xFF |
+```
+  ┌─────────────┐   SK04 (6-pin)    ┌─────┐
+  │     PSU     │ ────────────────► │     │
+  └─────────────┘                   │     │   SK02 (7-pin)   ┌──────────────┐
+                                    │     │ ───────────────► │ Colour Wheel │
+  ┌─────────────┐   SK01 (13-pin)   │Main │                  └──────────────┘
+  │  Light Src  │ ◄──────────────── │Board│
+  │ Control PCB │                   │     │   SK05 (20-pin)  ┌──────────────┐
+  │             │   SK03 (8-pin)    │     │ ───────────────► │   Thermal    │
+  └──────┬──────┘ ──────────────►  └─────┘                  │    Board     │
+         │            Red Laser                              └──────────────┘
+         └── Drives UV lamp + Red laser
+```
 
-### What the ESP32 spoofs
-
-| Signal | Connector | Method | Notes |
-|--------|-----------|--------|-------|
-| PRSV — presence detect | SK01 pin 13 | 10 kΩ pull-up to V5P0LD | Hardware only, no GPIO |
-| SENS — colour-wheel index ~120 Hz | SK02 pin 5 | `esp_timer` state machine | Starts on LDPCN rising edge |
-| LDUP — light-output PWM | SK01 pin 10 | `esp_timer` multi-phase waveform | Active while lamp is on |
-| LLITZ — intensity reference | SK01 pin 9 | GPIO driven HIGH | Asserted after UART init burst |
-| PHSENSE — photo sense ~2.87 V | SK05 pin 1 | GPIO HIGH via resistor divider | 10 kΩ / 68 kΩ from 3.3 V |
-| RX0LD / TX0LD — UART 19200 baud | SK01 pins 6/7 | Full packet replay on UART1 | Content-matched responses |
-| I2C 0x4D — temperature sensor | SK05 pins 6/7 | I2C0 slave (Wire) | 4 channels; Ch3 NEVER 0xFF |
-| I2C 0x41 — fan controller | SK05 pins 6/7 | I2C1 slave (Wire1) | ACKs write commands |
-| FG1 / FG2 — fan tachometers | SK05 pins 18/19 | GPIO driven LOW | Main board does not read these |
-
-### What stays physical
-
-| Device | Reason |
-|--------|--------|
-| **0x54 EEPROM** (SK05) | Contains ~300 bytes of projector-specific boot configuration read at startup. Cannot be spoofed — the data is unique to each unit. Desolder from thermal board and wire standalone. |
+**In photolithography mode:**
+- Light source control PCB → replaced by ESP32 spoofer (SK01)
+- Colour wheel → removed; SENS pulse spoofed (SK02)
+- Red laser → removed; SK03 disconnected
+- Thermal board → removed; I2C devices spoofed (SK05)
+- PSU → original or external bench supply (SK04)
 
 ---
 
-## Hardware Requirements
+## Connector Reference (Full EICD)
 
-- ESP32-S3 Super Mini (ESP32-S3**FH4R2** variant — 4 MB flash + 2 MB PSRAM)
-- AMS1117-3.3 (or equivalent) 3.3 V LDO regulator
-- 10 kΩ resistor × 2 (PRSV pull-up + PHSENSE divider top)
-- 68 kΩ resistor × 1 (PHSENSE divider bottom)
-- 2 × dupont jumper wires (I2C bus bridge)
-- Fine-pitch soldering equipment for thermal board modifications
+### SK01 — Light Source Control PCB ↔ Main Board
+**13-pin single row** | UART 19200 baud 8N1 + digital signals
 
----
+| Pin | Signal | Voltage | Direction | Function |
+|-----|--------|---------|-----------|----------|
+| 1 | LUM | 3V DC | OUT (PCB→MB) | Brightness reference from control PCB |
+| 2 | RXDBG | 5V DC | IN (MB→PCB) | Debug UART RX input to control PCB |
+| 3 | TXDBG | 3.3V DC | OUT (PCB→MB) | Debug UART TX — mirrors first RX0LD packet |
+| 4 | LDPCN | 3.3V digital | IN (MB→PCB) | Light driver enable — asserted by main board ~3 s after power-on |
+| 5 | CIDX | 3.3V pulsed | IN (MB→PCB) | Colour/frame sync from main board to DMD |
+| 6 | RX0LD | 3.3V UART | OUT (PCB→MB) | UART TX: control PCB → main board (19200 baud 8N1) |
+| 7 | TX0LD | 3.3V UART | IN (MB→PCB) | UART TX: main board → control PCB (19200 baud 8N1) |
+| 8 | LENBL | 3.3V digital | IN (MB→PCB) | Light enable from main board |
+| 9 | LLITZ | 3.3V DC | TBD | Intensity reference — HIGH when lamp is on. Must assert within 275 ms of ignition or fault triggers. Direction unconfirmed — probe before wiring. |
+| 10 | LDUP | 3.3V PWM | OUT (PCB→MB) | Multi-phase PWM proportional to light output power |
+| 11 | V5P0LD | 5V DC | PWR | 5V power rail supplied to control PCB from main board |
+| 12 | GND | 0V | PWR | Ground |
+| 13 | PRSV | 5V DC | OUT (PCB→MB) | Presence detect — must be HIGH for main board to initialise |
 
-## Hardware Modifications
-
-### 1. Thermal board (SK05)
-
-The entire thermal board is removed from the signal chain. Three ICs must be handled:
-
-**Remove — IC replaced by ESP32:**
-- `0x4D` temperature sensor — desolder and discard
-- `0x41` fan controller IC — desolder and discard
-
-**Keep — physical chip required:**
-- `0x54` EEPROM — desolder carefully and preserve. Wire it standalone:
-
-| EEPROM pin | Connection |
-|------------|------------|
-| VCC | 3.3 V |
-| GND | GND |
-| SDA | ESP32 GP10 (SK05 I2C bus) |
-| SCL | ESP32 GP12 (SK05 I2C bus) |
-| A0 | GND |
-| A1 | GND |
-| A2 | 3.3 V |
-
-> A2 = HIGH sets the address to 0x54 (`0b1010100`). Verify A0–A2 pinout against your specific EEPROM part number.
-
-### 2. Resistor divider — PHSENSE
-
-Produces ~2.87 V at SK05 pin 1 (target: 2.85 V).
-
-```
-3.3 V ── 10 kΩ ── GP9 ── 68 kΩ ── GND
-                    │
-               SK05 pin 1
-```
-
-### 3. Presence detect — PRSV
-
-```
-V5P0LD (SK01 pin 11, 5 V) ── 10 kΩ ── SK01 pin 13 (PRSV)
-```
-
-No GPIO involved. This signals to the main board that a control PCB is present.
-
-### 4. Power supply
-
-Power the ESP32 from V5P0LD (5 V available on SK01 pin 11) through an AMS1117-3.3 or equivalent LDO:
-
-```
-V5P0LD ── AMS1117-3.3 ── ESP32 3V3 pin
-```
-
-### 5. I2C bus bridge
-
-The ESP32 uses two I2C hardware controllers to answer two I2C addresses on the same physical bus. Wire two dupont jumpers on the **right-side header**:
-
-```
-GP10 ──┐  SDA bridge (dupont)
-GP11 ──┘  → SK05 pin 7
-
-GP12 ──┐  SCL bridge (dupont)
-GP13 ──┘  → SK05 pin 6
-```
-
-Both pairs are adjacent pins on the right header — one dupont wire each.
+| Pin | Spoofer action |
+|-----|----------------|
+| 4 LDPCN | Input — rising edge triggers ISR on **GP6** |
+| 6 RX0LD | Output — UART1 TX on **GP3** |
+| 7 TX0LD | Input — UART1 RX on **GP4** |
+| 9 LLITZ | Output — **GP7** driven HIGH after init burst |
+| 10 LDUP | Output — **GP8** multi-phase waveform via `esp_timer` |
+| 13 PRSV | Hardware — 10 kΩ pull-up to V5P0LD (5V) |
+| 11/12 | Power — V5P0LD → AMS1117-3.3 → ESP32 3V3 |
+| 1/2/3/5/8 | Not connected in spoofer build |
 
 ---
 
-## GPIO Pin Assignment
+### SK02 — Main Board → Colour Wheel
+**7-pin single row** | 3-phase BLDC motor drive + tachometer feedback
 
-### Board layout — ESP32-S3 Super Mini (USB-C at top, viewed from above)
+| Pin | Signal | Voltage | Direction | Function |
+|-----|--------|---------|-----------|----------|
+| 1 | C-C | 12V pulsed | OUT (MB→WHL) | BLDC motor phase C |
+| 2 | C-A | 12V pulsed | OUT (MB→WHL) | BLDC motor phase A |
+| 3 | C-B | 12V pulsed | OUT (MB→WHL) | BLDC motor phase B |
+| 4 | CGND | 0V | PWR | Motor ground |
+| 5 | SENS | 3.3V pulsed | IN (WHL→MB) | Rotation index — 1 pulse/rev (~120 Hz); used to sync with CIDX |
+| 6 | C3V3P | 3.3V | PWR | Logic supply for Hall effect sensors |
+| 7 | CMD | ~10V pulsed | OUT (MB→WHL) | Motor speed control signal |
+
+| Pin | Spoofer action |
+|-----|----------------|
+| 5 SENS | Output — **GP5** driven at ~120 Hz (7600 µs HIGH / 731 µs LOW) via `esp_timer`. Starts on LDPCN rising edge. |
+| 1/2/3/4/7 | Disconnected — wheel removed |
+| 6 | Can remain connected for Hall sensor logic power or leave open |
+
+---
+
+### SK03 — Light Source Control PCB → Red Laser
+**8-pin single row** | Analogue DAC brightness control
+
+| Pin | Signal | Voltage | Direction | Function |
+|-----|--------|---------|-----------|----------|
+| 1 | VREF | 2.54V DC | OUT (PCB→LAS) | Reference voltage for DAC circuits |
+| 2 | GND | 0V | PWR | Ground |
+| 3 | CTRL A | 0–3V stepped | OUT (PCB→LAS) | Red laser brightness/mode control channel A |
+| 4 | CTRL B | 0–3V stepped | OUT (PCB→LAS) | Red laser brightness/mode control channel B |
+| 5 | CTRL C | 0–3V stepped | OUT (PCB→LAS) | Red laser brightness/mode control channel C |
+| 6 | VLOGIC | 3.3V DC | PWR | Logic supply (pin 1 of 3) |
+| 7 | VLOGIC | 3.3V DC | PWR | Logic supply (pin 2 of 3) |
+| 8 | VLOGIC | 3.3V DC | PWR | Logic supply (pin 3 of 3) |
+
+| Pin | Spoofer action |
+|-----|----------------|
+| All | **Disconnected** — red laser removed in conversion. No spoofing required. |
+
+> The control PCB translates UART telemetry commands from the main board into stepped analogue voltages on CTRL A/B/C to set laser brightness. With the control PCB itself replaced by the ESP32, SK03 has no source and no load.
+
+---
+
+### SK04 — PSU → Main Board
+**6-pin single row** | DC power distribution
+
+| Pin | Signal | Voltage | Direction | Function |
+|-----|--------|---------|-----------|----------|
+| 1 | SENSE | 4.2V → 2.7V | OUT (PSU→MB) | PSU status — 4.2V when off, drops to 2.7V under load when active |
+| 2 | 5V | 5V DC | PWR | 5V logic supply to main board |
+| 3 | GND | 0V | PWR | Ground (1 of 2) |
+| 4 | GND | 0V | PWR | Ground (2 of 2) |
+| 5 | 12V | 12V DC | PWR | Main 12V rail (1 of 2) |
+| 6 | 12V | 12V DC | PWR | Main 12V rail (2 of 2, doubled for current capacity) |
+
+| Pin | Spoofer action |
+|-----|----------------|
+| 2/3/4/5/6 | Keep original PSU, or provide 5V + 12V from external bench supply |
+| 1 SENSE | Keep original PSU connection. If using a bench supply, replicate the 2.7V under-load behaviour with a resistor divider from 5V. Probe resistance to other rails with PSU disconnected to characterise. |
+
+---
+
+### SK05 — Main Board → Thermal Management Board
+**20-pin dual row (2×10)** | I2C temperature sensing + fan control + UART (idle)
+
+| Pin | Signal | Voltage | Direction | Function |
+|-----|--------|---------|-----------|----------|
+| 1 | PHSENSE | 2.85V analogue | IN (THM→MB) | Photo sense — 2.85V steady when light source active. Pulses 2.85V↔0V at ~125 Hz when laser output physically blocked (photodiode monitoring light throughput). |
+| 2 | TX | 3.3V UART | OUT (MB→THM) | UART TX from main board to thermal MCU |
+| 3 | RX | 3.3V UART | IN (THM→MB) | UART RX from thermal MCU to main board |
+| 4 | FPCN4 | 3.3V digital | OUT (MB→THM) | Fan enable channel 4 — 0V=off, 3.3V=on |
+| 5 | FPCN2 | 3.3V digital | OUT (MB→THM) | Fan enable channel 2 — 0V=off, 3.3V=on |
+| 6 | I2SCL | 3.3V digital | OUT (MB→THM) | I2C clock — main board is master |
+| 7 | I2SDA | 3.3V digital | BIDIR | I2C data — temperature sensor bus |
+| 8 | V33PMD | 3.3V DC | PWR | 3.3V power to thermal board |
+| 9 | — | — | — | Not populated |
+| 10 | V12FAN2 | 12V DC | PWR | 12V fan supply (fan 2) |
+| 11 | V5PMD | 5V DC | PWR | 5V power to thermal board |
+| 12 | — | — | — | Not populated |
+| 13 | FPCN5 | 3.3V digital | OUT (MB→THM) | Fan enable channel 5 — 0V=off, 3.3V=on |
+| 14 | FPCN3 | 3.3V digital | OUT (MB→THM) | Fan enable channel 3 — 0V=off, 3.3V=on |
+| 15 | FPCN1 | 3.3V digital | OUT (MB→THM) | Fan enable channel 1 — 0V=off, 3.3V=on |
+| 16 | — | — | — | Not populated |
+| 17 | — | — | — | Not populated |
+| 18 | FG2 | 3.3V digital | IN (THM→MB) | Fan tachometer 2 — main board does not read this |
+| 19 | FG1 | 3.3V digital | IN (THM→MB) | Fan tachometer 1 — main board does not read this |
+| 20 | V12FAN1 | 12V DC | PWR | 12V fan supply (fan 1) |
+
+**I2C devices on pins 6/7:**
+
+| Address | Device | Action |
+|---------|--------|--------|
+| **0x4D** | Multi-channel temperature sensor | **Spoof** — remove IC, replace with ESP32 I2C0 slave on GP10/GP12 |
+| **0x41** | Fan controller / GPIO expander | **Spoof** — remove IC, replace with ESP32 I2C1 slave on GP11/GP13 |
+| **0x54** | AT24C EEPROM | **Keep** — desolder from thermal board, wire standalone to GP10/GP12. Contains projector-specific boot config. |
+
+| Pin | Spoofer action |
+|-----|----------------|
+| 1 PHSENSE | Output — **GP9** driven HIGH → ~2.87V via 10kΩ/68kΩ divider. Asserted with LLITZ. |
+| 6/7 I2C | I2C0 slave 0x4D on **GP10/GP12** + I2C1 slave 0x41 on **GP11/GP13**, bridged with dupont jumpers |
+| 18/19 FG1/FG2 | Output — **GP1/GP2** driven LOW (not monitored by main board) |
+| 2/3 UART | Not connected — idle throughout all captures |
+| 4/5/13/14/15 FPCN | Not connected — digital enables from main board; no thermal board to drive |
+| 8/10/11/20 Power | Not connected — thermal board removed |
+
+---
+
+## ESP32-S3 Super Mini Pin Assignment
+
+### Board layout (USB-C at top, viewed from above)
 
 | Function | Left header | | Right header | Function |
 |---:|:---:|:---:|:---:|:---|
-| USB debug TX | **TX (GP43)** | | **+5V** | Power in → LDO → 3.3 V |
+| USB debug TX | **TX (GP43)** | | **+5V** | Power in → AMS1117-3.3 → 3.3V |
 | USB debug RX | **RX (GP44)** | | **GND** | Ground |
-| FG1 — fan tach 1 (LOW) | **GP1** | | **+3V3** | 3.3 V out |
-| FG2 — fan tach 2 (LOW) | **GP2** | | **GP13** | I2C1 SCL → 0x41 ┐ dupont |
-| RX0LD TX → main board | **GP3** | | **GP12** | I2C0 SCL → 0x4D ┘ 12↔13 |
-| TX0LD RX ← main board | **GP4** | | **GP11** | I2C1 SDA → 0x41 ┐ dupont |
-| SENS — colour wheel ~120 Hz | **GP5** | | **GP10** | I2C0 SDA → 0x4D ┘ 10↔11 |
-| LDPCN — light enable input | **GP6** | | **GP9** | PHSENSE — photo sense output |
-| LLITZ — intensity ref output | **GP7** | | **GP8** | LDUP — light PWM output |
+| SK05 pin 19 — FG1 tach (LOW) | **GP1** | | **+3V3** | 3.3V out |
+| SK05 pin 18 — FG2 tach (LOW) | **GP2** | | **GP13** | I2C1 SCL → 0x41 ┐ dupont |
+| SK01 pin 6 — RX0LD UART TX | **GP3** | | **GP12** | I2C0 SCL → 0x4D ┘ 12↔13 |
+| SK01 pin 7 — TX0LD UART RX | **GP4** | | **GP11** | I2C1 SDA → 0x41 ┐ dupont |
+| SK02 pin 5 — SENS ~120 Hz | **GP5** | | **GP10** | I2C0 SDA → 0x4D ┘ 10↔11 |
+| SK01 pin 4 — LDPCN input | **GP6** | | **GP9** | SK05 pin 1 — PHSENSE output |
+| SK01 pin 9 — LLITZ output | **GP7** | | **GP8** | SK01 pin 10 — LDUP output |
 
-### Back pads (solder points)
+### I2C bus bridge (dupont jumpers on right header)
+
+```
+GP10 ──┐  SDA  (adjacent pins, one dupont wire)
+GP11 ──┘  ──────────────────────────► SK05 pin 7 (I2SDA)
+
+GP12 ──┐  SCL  (adjacent pins, one dupont wire)
+GP13 ──┘  ──────────────────────────► SK05 pin 6 (I2SCL)
+```
+
+Two I2C hardware controllers share one physical bus. I2C is open-drain — wire-OR between GP10↔GP11 and GP12↔GP13 is electrically safe.
+
+### Back pads
 
 | Pad | Status |
 |-----|--------|
@@ -142,67 +213,77 @@ Both pairs are adjacent pins on the right header — one dupont wire each.
 
 ---
 
-## Signal Reference
+## Hardware Bill of Materials
 
-### SENS — colour-wheel index pulse
-- **Waveform:** 7600 µs HIGH / 731 µs LOW ≈ 120.03 Hz, 91.2% duty cycle
-- **Starts:** on LDPCN rising edge (not at power-on)
-- **Stops:** on graceful shutdown command
-
-### LDUP — light-output PWM
-- **Waveform:** one-time start pulse then repeating 6-phase loop (all values µs):
-
-```
-Start:  HIGH 1180 → LOW 1108
-Loop:   HIGH  236 → LOW 3959 → HIGH 236 → LOW 2710 → HIGH 236 → LOW 1107 → (repeat loop)
-```
-
-> ⚠ These values are from an earlier oscilloscope capture and should be verified against your specific projector with a scope before relying on them. Update `LDUP_P0_H` through `LDUP_P7_L` in `src/config.h` if they differ.
-
-### LLITZ — intensity reference
-- Driven HIGH after the 6-packet UART init burst (~4.8 s from LDPCN)
-- Driven LOW on shutdown command
-- **Direction unconfirmed** — probe SK01 pin 9 with a high-impedance scope during normal projector operation before wiring. If the main board drives it HIGH, set GP7 as input-only.
-
-### PHSENSE — photo sense
-- GP9 driven HIGH → ~2.87 V at SK05 pin 1 via 10 kΩ / 68 kΩ divider
-- Asserted with LLITZ, de-asserted on shutdown
-
-### UART — SK01 UART1
-- 19200 baud, 8N1, half-duplex request/response
-- GP3 = TX (ESP32 → main board), GP4 = RX (main board → ESP32)
-- Every incoming packet is matched against a known pattern table; the correct pre-recorded response is sent by content, not by counter
-
-### I2C — SK05 temperature sensor (0x4D)
-- Main board writes a 1-byte register address, then reads 1 byte back
-- Polling interval: ~510 ms, 4 channels per cycle
-
-| Register | Channel | Value returned | Temperature |
-|----------|---------|----------------|-------------|
-| 0x3E / 0x3F | Ch1 — main board ambient | 0x2E / 0x80 | 46.5 °C |
-| 0x4E / 0x4F | Ch2 — secondary area | 0x2F / 0x80 | 47.5 °C |
-| 0x5E / 0x5F | Ch3 — laser heatsink | 0x4A / 0x80 | 74.5 °C |
-| 0x6E / 0x6F | Ch4 — UV source area | 0x2E / 0x80 | 46.5 °C |
-
-### I2C — SK05 fan controller (0x41)
-- Main board writes fan speed commands (reg 0x01 = 0xF8, reg 0x02 = 0xF8, every ~2 s)
-- No read requests observed in captured traffic — ESP32 ACKs all writes and returns 0x00 on reads
+| Qty | Component | Value / Part | Purpose |
+|-----|-----------|--------------|---------|
+| 1 | ESP32-S3 Super Mini | ESP32-S3FH4R2 | Main controller |
+| 1 | LDO regulator | AMS1117-3.3 | 5V → 3.3V for ESP32 |
+| 1 | Resistor | 10 kΩ | PRSV pull-up (SK01 pin 13 → V5P0LD) |
+| 1 | Resistor | 10 kΩ | PHSENSE divider top (3.3V → GP9) |
+| 1 | Resistor | 68 kΩ | PHSENSE divider bottom (GP9 → GND) |
+| 2 | Dupont jumper wire | F-F or M-M | I2C bus bridge (GP10↔GP11, GP12↔GP13) |
+| 1 | AT24C EEPROM | Original from thermal board | 0x54 boot config — must be preserved |
 
 ---
 
-## UART Boot Sequence
+## PHSENSE Resistor Divider
+
+Produces ~2.87 V at SK05 pin 1 (main board target: 2.85 V).
+
+```
+3.3V ── 10 kΩ ── GP9 ── 68 kΩ ── GND
+                  │
+             SK05 pin 1
+```
+`V = 3.3 × 68k / (10k + 68k) ≈ 2.87 V`
+
+---
+
+## UART Protocol — SK01
+
+Both directions run at **19200 baud, 8N1**. Packets are separated by 5 ms of silence.
+
+### Boot sequence timeline
 
 | Time | Direction | Event |
 |------|-----------|-------|
-| +3.0 s | — | LDPCN goes HIGH — spoofer wakes, SENS starts |
-| +3.4 s | → main board | Announce: `03 40 08 F0` |
-| +4.3 s | ← main board | 6 init queries (device ID, config, calibration) |
-| +4.3 s | → main board | 6 matched responses |
+| +3.0 s | — | LDPCN HIGH — spoofer wakes, SENS starts |
+| +3.4 s | ESP32 → main board | Announce: `03 40 08 F0` |
+| +4.3 s | main board → ESP32 | 6 init queries (device ID, config, calibration) |
+| +4.3 s | ESP32 → main board | 6 content-matched responses |
 | +4.8 s | — | LLITZ, LDUP, PHSENSE asserted |
-| +5.2 s | ← main board | Steady-state polls begin (~490 ms interval) |
-| +5.2 s | → main board | 31 unique telemetry packets, then locked steady-state |
-| +22.0 s | ← main board | `02 00` graceful shutdown |
-| +22.0 s | → main board | `01` shutdown ACK; all signals de-asserted |
+| +5.2 s | main board → ESP32 | Steady-state polls (~490 ms interval) |
+| +5.2 s | ESP32 → main board | 31 unique telemetry packets, then steady-state lock |
+| +22.0 s | main board → ESP32 | `02 00` graceful shutdown |
+| +22.0 s | ESP32 → main board | `01` ACK; all signals de-asserted |
+
+### Packet matching
+
+Every incoming TX0LD packet is matched against a known pattern table — the correct response is selected by content, not by counter. Unrecognised packets are logged as `??? UNRECOGNISED` with a sequential fallback response so the state machine does not stall.
+
+---
+
+## I2C Protocol — SK05
+
+### 0x4D Temperature sensor — register map
+
+| Register | Channel | Spoofed value | Temperature |
+|----------|---------|---------------|-------------|
+| 0x3E / 0x3F | Ch1 — main board ambient | 0x2E / 0x80 | 46.5 °C |
+| 0x4E / 0x4F | Ch2 — secondary area | 0x2F / 0x80 | 47.5 °C |
+| 0x5E / 0x5F | Ch3 — laser heatsink | **0x4A** / 0x80 | 74.5 °C |
+| 0x6E / 0x6F | Ch4 — UV source area | 0x2E / 0x80 | 46.5 °C |
+
+> **Ch3 register 0x5E must NEVER return 0xFF.** The main board initiates thermal shutdown ~10 s after receiving it.
+
+### 0x41 Fan controller — observed transactions
+
+| Phase | Main board writes | ESP32 response |
+|-------|-------------------|----------------|
+| Boot init | `82 00 81`, `82 01 00`, `82 02 00`, `82 03 40`, `82 04 C0` | ACK |
+| Periodic (~2 s) | `82 01 F8`, `82 02 F8` | ACK |
+| Any read | — | 0x00 |
 
 ---
 
@@ -210,45 +291,42 @@ Loop:   HIGH  236 → LOW 3959 → HIGH 236 → LOW 2710 → HIGH 236 → LOW 11
 
 ```
 src/
-├── config.h           — all pin numbers, baud rate, timing, I2C addresses, temp values
-├── packets.h          — 45 RX0LD byte arrays, TX match tables, lookup tables, labels
-├── main.cpp           — GPIO setup, RTOS primitives, ISR installation, task spawning
-├── signals.h/.cpp     — SENS and LDUP via esp_timer one-shot state machines
-├── uart_primary.h/.cpp— Task A: content-matched UART state machine on Core 0
-└── i2c_slave.h/.cpp   — I2C0 slave 0x4D (Wire) + I2C1 slave 0x41 (Wire1)
+├── config.h            — pin numbers, baud rate, timing constants, I2C addresses, temp values
+├── packets.h           — 45 RX0LD arrays, TX match tables, RX lookup tables, labels
+├── main.cpp            — GPIO init, RTOS primitives, ISR install, task spawn
+├── signals.h / .cpp    — SENS and LDUP via esp_timer one-shot state machines
+├── uart_primary.h/.cpp — Task A: content-matched UART state machine (Core 0)
+└── i2c_slave.h / .cpp  — I2C0 slave 0x4D (Wire) + I2C1 slave 0x41 (Wire1)
 ```
 
 ### FreeRTOS task map
 
 | Core | Task | Priority | Role |
 |------|------|----------|------|
-| 0 | `uart_primary` | 10 | UART state machine |
-| 0 | `esp_timer` | 22 | SENS and LDUP waveform callbacks |
-| 0 | I2C ISR | interrupt | Wire/Wire1 slave request handlers |
+| 0 | `uart_primary` | 10 | UART state machine — handles all SK01 UART exchanges |
+| 0 | `esp_timer` | 22 | SENS and LDUP waveform timer callbacks |
+| 0 | I2C ISR | interrupt | Wire/Wire1 slave request handlers for 0x4D and 0x41 |
 | 1 | Arduino `loop()` | 1 | Idle — `vTaskDelay(portMAX_DELAY)` |
 
 ---
 
 ## Building
 
-> **Windows:** Build exclusively from the VS Code PlatformIO extension. The Windows shell interprets paths starting with `/Users` as invalid command switches — command-line builds will fail.
+> **Windows only:** Build from the **VS Code PlatformIO extension**, not the terminal. The Windows shell interprets path arguments starting with `/Users` as invalid command switches and the build will fail.
 
 1. Open the project folder in VS Code
-2. PlatformIO sidebar → **esp32s3** → **Build**
-3. Confirm zero errors
-4. PlatformIO sidebar → **esp32s3** → **Upload**
+2. PlatformIO sidebar → **esp32s3** → **Build** — confirm 0 errors
+3. PlatformIO sidebar → **esp32s3** → **Upload**
 
-`CORE_DEBUG_LEVEL=3` is enabled by default for bringup. Set it to `0` in `platformio.ini` before production deployment.
+`CORE_DEBUG_LEVEL=3` is set for bringup. Change to `0` in `platformio.ini` for production.
 
 ---
 
-## Serial Monitor / Debug Output
+## Serial Monitor
 
-Connect USB before powering the projector. Open the serial monitor at **115200 baud**.
+Connect USB **before** powering the projector. Open the monitor at **115 200 baud**.
 
-> If USB is not connected at power-on, debug output is silently discarded — this is by design so the boot sequence is not delayed waiting for USB enumeration. Connect USB and cycle projector power to capture a full boot log.
-
-Example output:
+If USB is not connected at power-on, debug output is silently discarded — the boot sequence is not delayed waiting for USB enumeration. Connect USB and cycle projector power to capture a full boot log.
 
 ```
 ┌─────────────────────────────────────┐
@@ -262,8 +340,9 @@ Example output:
 ── INIT BURST ───────────────────────
 [   3891 ms]  ←  device query         03 01 9D 2D E2
 [   3892 ms]  →  device ID            03 42 AB 6F 44 01 01 0D 63 B0
+[   3894 ms]  ←  config read          03 01 11 92
+[   3895 ms]  →  config ACK           03 40 11 92
 ...
-
 ── LAMP ON ──────────────────────────
 [   4821 ms]  ▲  LLITZ ON   LDUP ON   PHSENSE ON
 
@@ -273,60 +352,60 @@ Example output:
 [   5800 ms]  ←  heartbeat            03 20 D3 95 F0
 [   5800 ms]  →  heartbeat echo       03 20 D3 95 F0
 [  22015 ms]  ←  graceful shutdown    02 00
-[  22015 ms]  →  shutdown ACK         01
+[  22016 ms]  →  shutdown ACK         01
 
 ── SHUTDOWN ─────────────────────────
 [  22016 ms]  ▼  LLITZ OFF  LDUP OFF  PHSENSE OFF
 ```
 
-Any packet the spoofer does not recognise is logged as `??? UNRECOGNISED` with its full hex dump — use this to identify new packet types from your specific projector revision.
+Any packet the spoofer does not recognise is logged as `??? UNRECOGNISED` with its raw hex — use this to identify new packet types from your specific projector revision.
 
 ---
 
 ## Verification Checklist
 
-Complete in order. Do not connect to the projector until steps 1–8 pass.
+Complete in order. Do not connect to the projector until steps 1–9 pass on the bench.
 
 | # | Test | Pass condition |
 |---|------|----------------|
 | 1 | **Build** | PlatformIO reports 0 errors |
-| 2 | **SENS** | Scope on GP5: 120 Hz, 91% duty, starts only after LDPCN HIGH |
-| 3 | **LDUP** | Scope on GP8: 1180/1108 µs start pulse, then repeating 236/3959/236/2710/236/1107 µs loop |
-| 4 | **LDPCN trigger** | Drive GP6 HIGH externally — serial monitor shows announce sent, init sequence, LLITZ ON |
-| 5 | **UART content** | Logic analyser on GP3/GP4 at 19200 baud — verify responses match init queries; confirm `88 0F` never appears |
-| 6 | **LLITZ** | Scope/meter on GP7: goes HIGH after init, stays HIGH |
-| 7 | **LDUP direction** | Probe SK01 pin 10 before wiring — confirm ESP32 drives it (not main board) |
-| 8 | **I2C** | I2C analyser on SK05 pins 6/7 — address 0x4D responds; reg 0x5E returns 0x4A; address 0x41 ACKs writes |
-| 9 | **PHSENSE** | Multimeter at SK05 pin 1: ~2.85 V when GP9 is HIGH |
-| 10 | **Full system** | Connect to projector with UV laser in place — stable operation for 20+ seconds, no fault shutdown, DMD responds to display input |
+| 2 | **PRSV** | Multimeter SK01 pin 13 → +5V with 10 kΩ resistor in place |
+| 3 | **SENS** | Scope GP5: 120 Hz, 91% duty, starts only after GP6 (LDPCN) goes HIGH |
+| 4 | **LDUP** | Scope GP8: 1180/1108 µs start pulse, then repeating 236/3959/236/2710/236/1107 µs loop |
+| 5 | **LDPCN trigger** | Drive GP6 HIGH externally — serial monitor shows announce, init burst, LLITZ ON |
+| 6 | **UART content** | Logic analyser GP3/GP4 at 19200 baud — responses match queries; `88 0F` never appears |
+| 7 | **LLITZ** | Scope/meter GP7: HIGH after init, stays HIGH until shutdown |
+| 8 | **I2C** | I2C analyser SK05 pins 6/7 — 0x4D responds; reg 0x5E returns 0x4A; 0x41 ACKs writes |
+| 9 | **PHSENSE** | Multimeter SK05 pin 1: ~2.85 V when GP9 is HIGH |
+| 10 | **Full system** | Connected to projector with 405 nm laser — stable for 20+ s, no fault shutdown, DMD responds |
 
 ---
 
-## Known Issues and Things to Watch
+## Known Issues and Cautions
 
 ### LDUP waveform values are unverified
-The phase timings in `src/config.h` (`LDUP_P0_H` through `LDUP_P7_L`) were captured from an earlier oscilloscope session and may not match your specific projector revision. Capture the waveform on SK01 pin 10 during normal operation **before** removing the original control PCB and update the constants if they differ. An incorrect LDUP waveform may not immediately cause shutdown but will produce incorrect lamp-on telemetry over time.
+The phase timings (`LDUP_P0_H` through `LDUP_P7_L` in `config.h`) were captured from an earlier oscilloscope session and may not match your unit. Capture the waveform on SK01 pin 10 during normal operation **before** removing the original control PCB and update the constants if they differ.
 
 ### LLITZ direction is unconfirmed
-`src/config.h` marks PIN_LLITZ direction as TBD. If the main board drives SK01 pin 9 HIGH (rather than the control PCB), wiring GP7 as an output creates a bus conflict. Probe with a high-impedance oscilloscope before making the connection. If the main board is the driver, change `GPIO_MODE_OUTPUT` to `GPIO_MODE_INPUT` in `uart_primary.cpp`.
+Probe SK01 pin 9 with a high-impedance scope during a normal boot. If the main board drives it HIGH rather than the control PCB, configure GP7 as input-only to avoid a bus conflict. The firmware comment in `uart_primary.cpp` shows where to change `GPIO_MODE_OUTPUT` to `GPIO_MODE_INPUT`.
 
 ### SENS frequency may vary
-The 120 Hz / 7600 µs / 731 µs values were measured from one projector. The main board checks that the colour-wheel pulse is present but may not verify exact frequency — verify on your unit before removing the colour wheel assembly and update `SENS_HIGH_US` / `SENS_LOW_US` in `src/config.h` if needed.
+Measure the actual index pulse frequency on SK02 pin 5 before removing the colour wheel. Update `SENS_HIGH_US` and `SENS_LOW_US` in `config.h` if it differs from 7600/731 µs.
+
+### SK04 SENSE pin behaviour
+Pin 1 of SK04 reads 4.2 V when the PSU is off and drops to ~2.7 V under load. If using an external bench supply, replicate this drop (a simple resistor divider from 5V works). Failing to do so may prevent the main board from completing its PSU-good check.
 
 ### 0x54 EEPROM is mandatory
-The main board reads ~300 bytes of calibration and configuration data from the 0x54 EEPROM at startup. This data is unique to each projector and cannot be reconstructed or spoofed generically. The original chip **must** be present and wired correctly. Loss of this chip or wiring errors at startup will cause the main board to fault before LDPCN is ever asserted.
+The main board reads ~300 bytes of projector-specific calibration data from the EEPROM at every boot. This data cannot be reconstructed. The original chip must be desoldered from the thermal board and wired standalone to the I2C bus. Loss of this chip causes the main board to fault before LDPCN is ever asserted.
 
-### Critical byte sequence — UART
-The byte sequence `0x88 0x0F` must never appear in any packet transmitted by the ESP32 on GP3. This is the lamp-fault telemetry pattern. The main board initiates shutdown within approximately 10 seconds of receiving it. The pre-recorded packet table has been verified to be free of this sequence, but verify again if you modify any `RX_SEQ_*` entries in `src/packets.h`.
+### Never transmit `0x88 0x0F` on SK01 pin 6
+This is the lamp-fault telemetry pattern. The main board initiates shutdown within ~10 s of receiving it. The pre-recorded packet table has been verified clean, but re-verify if any `RX_SEQ_*` entries in `packets.h` are modified.
 
-### Critical register — I2C
-I2C register `0x5E` (Ch3, laser heatsink temperature) must never return `0xFF`. The main board initiates thermal shutdown approximately 10 seconds after receiving this value. The current constant `TEMP_CH3_MSB = 0x4A` (74 °C) is safe. Do not change it to a value that could be misinterpreted as a fault.
+### Never return `0xFF` on I2C register `0x5E`
+Register 0x5E is the laser heatsink temperature channel. The main board initiates thermal shutdown ~10 s after receiving 0xFF. The current constant `TEMP_CH3_MSB = 0x4A` is safe. Do not change it to 0xFF or any value that wraps to it through arithmetic.
 
-### GPIO33–37 back pads are PSRAM
-The ESP32-S3FH4R2 variant used on the Super Mini hard-wires GPIO33–37 to the onboard PSRAM. These pads are exposed on the back of the board but are not available as general-purpose I/O. Using them will corrupt PSRAM and cause random crashes.
+### GPIO 33–37 back pads are connected to PSRAM
+The ESP32-S3FH4R2 variant hard-wires these GPIOs to the onboard PSRAM. They appear as accessible pads on the back of the Super Mini but cannot be used as general I/O. Using them will corrupt PSRAM and cause unpredictable crashes.
 
 ### No serial output when running without USB
-The USB CDC serial wait was intentionally removed to prevent blocking task creation past the LDPCN window. When the board is powered from the projector without a USB host connected, all `Serial.printf` output is silently discarded. To capture a boot log, connect USB before cycling projector power.
-
-### Build from VS Code PlatformIO only (Windows)
-The Windows command processor interprets path arguments beginning with `/Users` as command-line switches. Running `pio run` from a terminal on Windows will fail. Use the PlatformIO sidebar in VS Code exclusively.
+By design — the USB CDC wait was removed to prevent blocking task creation past the LDPCN timing window. Connect USB before cycling projector power to observe the boot log.

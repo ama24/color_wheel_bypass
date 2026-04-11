@@ -76,13 +76,13 @@ The projector contains five connectors linking the main board, light source cont
 | 2 | C-A | 12V pulsed | OUT (MB→WHL) | BLDC motor phase A |
 | 3 | C-B | 12V pulsed | OUT (MB→WHL) | BLDC motor phase B |
 | 4 | CGND | 0V | PWR | Motor ground |
-| 5 | SENS | 3.3V pulsed | IN (WHL→MB) | Rotation index — 1 pulse/rev (~120 Hz); used to sync with CIDX |
+| 5 | SENS | 3.3V pulsed | IN (WHL→MB) | Rotation index — 1 pulse/rev (~120–170 Hz); used to sync with CIDX |
 | 6 | C3V3P | 3.3V | PWR | Logic supply for Hall effect sensors |
 | 7 | CMD | ~10V pulsed | OUT (MB→WHL) | Motor speed control signal |
 
 | Pin | Spoofer action |
 |-----|----------------|
-| 5 SENS | Output — **GP5** driven at ~120 Hz (7600 µs HIGH / 731 µs LOW) via `esp_timer`. Starts on LDPCN rising edge. |
+| 5 SENS | Output — **GP5** driven at ~120 Hz (7600 µs HIGH / 731 µs LOW) via `esp_timer`. Starts on LDPCN rising edge. Actual frequency is 120–170 Hz — measure SK02 pin 5 with a scope **before** removing the wheel and update `SENS_HIGH_US` / `SENS_LOW_US` in `config.h` if it differs. |
 | 1/2/3/4/7 | Disconnected — wheel removed |
 | 6 | Can remain connected for Hall sensor logic power or leave open |
 
@@ -107,6 +107,8 @@ The projector contains five connectors linking the main board, light source cont
 | All | **Disconnected** — red laser removed in conversion. No spoofing required. |
 
 > The control PCB translates UART telemetry commands from the main board into stepped analogue voltages on CTRL A/B/C to set laser brightness. With the control PCB itself replaced by the ESP32, SK03 has no source and no load.
+>
+> **Future opportunity — red preview mode:** The red laser is at a wavelength that does not expose UV photoresist. Restoring it as an independently controlled source (bypassing the original control PCB) would allow a non-exposing preview pass: project alignment shapes (crosshairs, registration marks, board outlines) directly onto the coated substrate to verify positioning before firing the 405 nm laser. This could also support dry runs and focus calibration over unexposed boards. Implementation would require a DAC or PWM-filtered signal on the CTRL A/B/C lines and a small driver board to replace the analogue section of the original control PCB.
 
 ---
 
@@ -115,7 +117,7 @@ The projector contains five connectors linking the main board, light source cont
 
 | Pin | Signal | Voltage | Direction | Function |
 |-----|--------|---------|-----------|----------|
-| 1 | SENSE | 4.2V → 2.7V | OUT (PSU→MB) | PSU status — 4.2V when off, drops to 2.7V under load when active |
+| 1 | SENSE | 2.7V | PSU-internal | PSU-internal enable — not read by main board (confirmed). PSU requires ~2.7V / 5mA on this pin to activate its own output rails. Irrelevant when replacing the PSU with an external supply. |
 | 2 | 5V | 5V DC | PWR | 5V logic supply to main board |
 | 3 | GND | 0V | PWR | Ground (1 of 2) |
 | 4 | GND | 0V | PWR | Ground (2 of 2) |
@@ -124,8 +126,8 @@ The projector contains five connectors linking the main board, light source cont
 
 | Pin | Spoofer action |
 |-----|----------------|
-| 2/3/4/5/6 | Keep original PSU, or provide 5V + 12V from external bench supply |
-| 1 SENSE | Keep original PSU connection. If using a bench supply, replicate the 2.7V under-load behaviour with a resistor divider from 5V. Probe resistance to other rails with PSU disconnected to characterise. |
+| 2/3/4/5/6 | Keep original PSU, or provide 5V + 12V from an external bench supply |
+| 1 SENSE | **Leave unconnected on the main board side** — confirmed PSU-internal only; the main board never reads it. If you need to operate the original PSU standalone (bench testing or reuse), feed 2.7V through a 220Ω resistor into this pin to activate its output rails. |
 
 ---
 
@@ -268,12 +270,12 @@ Every incoming TX0LD packet is matched against a known pattern table — the cor
 
 ### 0x4D Temperature sensor — register map
 
-| Register | Channel | Spoofed value | Temperature |
-|----------|---------|---------------|-------------|
-| 0x3E / 0x3F | Ch1 — main board ambient | 0x2E / 0x80 | 46.5 °C |
-| 0x4E / 0x4F | Ch2 — secondary area | 0x2F / 0x80 | 47.5 °C |
-| 0x5E / 0x5F | Ch3 — laser heatsink | **0x4A** / 0x80 | 74.5 °C |
-| 0x6E / 0x6F | Ch4 — UV source area | 0x2E / 0x80 | 46.5 °C |
+| Register | Channel | Spoofed value | Temperature | Notes |
+|----------|---------|---------------|-------------|-------|
+| 0x3E / 0x3F | Ch1 — main board ambient | 0x2E / 0x80 | 46.5 °C | Nominal range 46–47 °C |
+| 0x4E / 0x4F | Ch2 — secondary area | 0x2F / 0x80 | 47.5 °C | Nominal range 47–48 °C |
+| 0x5E / 0x5F | Ch3 — laser heatsink | **0x4A** / 0x80 | 74.5 °C | Nominal range 74–75 °C. **Never return 0xFF.** |
+| 0x6E / 0x6F | Ch4 — UV source area | 0x2E / 0x80 | 46.5 °C | Noisy in captures (41–48 °C); fan 3 thermal interference. |
 
 > **Ch3 register 0x5E must NEVER return 0xFF.** The main board initiates thermal shutdown ~10 s after receiving it.
 
@@ -389,11 +391,11 @@ The phase timings (`LDUP_P0_H` through `LDUP_P7_L` in `config.h`) were captured 
 ### LLITZ direction is unconfirmed
 Probe SK01 pin 9 with a high-impedance scope during a normal boot. If the main board drives it HIGH rather than the control PCB, configure GP7 as input-only to avoid a bus conflict. The firmware comment in `uart_primary.cpp` shows where to change `GPIO_MODE_OUTPUT` to `GPIO_MODE_INPUT`.
 
-### SENS frequency may vary
-Measure the actual index pulse frequency on SK02 pin 5 before removing the colour wheel. Update `SENS_HIGH_US` and `SENS_LOW_US` in `config.h` if it differs from 7600/731 µs.
+### SENS frequency varies by unit (120–170 Hz range documented)
+The colour wheel index frequency varies across projector units — the v1.1 reference documents a range of 120–170 Hz. The firmware defaults to 120 Hz (7600/731 µs). Measure SK02 pin 5 with a scope **before** removing the wheel and update `SENS_HIGH_US` and `SENS_LOW_US` in `config.h` to match.
 
-### SK04 SENSE pin behaviour
-Pin 1 of SK04 reads 4.2 V when the PSU is off and drops to ~2.7 V under load. If using an external bench supply, replicate this drop (a simple resistor divider from 5V works). Failing to do so may prevent the main board from completing its PSU-good check.
+### SK04 SENSE pin — confirmed PSU-internal, not read by main board
+Testing confirmed that SK04 pin 1 is a PSU-internal enable signal. The main board does not read it (disconnecting it from the main board entirely had no effect on operation). When replacing the PSU with an external bench supply, leave this pin unconnected on the main board side. If you ever need to operate the **original PSU standalone** (bench testing, reuse), feed 2.7 V through a 220 Ω resistor into the SENSE pin to activate its 12 V and 5 V output rails.
 
 ### 0x54 EEPROM is mandatory
 The main board reads ~300 bytes of projector-specific calibration data from the EEPROM at every boot. This data cannot be reconstructed. The original chip must be desoldered from the thermal board and wired standalone to the I2C bus. Loss of this chip causes the main board to fault before LDPCN is ever asserted.

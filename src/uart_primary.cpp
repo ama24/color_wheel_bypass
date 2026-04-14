@@ -120,18 +120,20 @@ static void send_pkt(const uint8_t* data, uint8_t len, const char* label)
 static void lamp_on()
 {
     gpio_set_level(static_cast<gpio_num_t>(PIN_LLITZ),   1);
-    ldup_start();
+    // LDUP (GP8) is a main board output — do NOT drive it from ESP32.
+    // v1.3 confirmed: MB generates ~42 kHz PWM on this line regardless of
+    // the control PCB. ldup_start() is intentionally not called here.
     gpio_set_level(static_cast<gpio_num_t>(PIN_PHSENSE), 1);
-    log_event("▲  LLITZ ON   LDUP ON   PHSENSE ON");
+    log_event("▲  LLITZ ON   PHSENSE ON");
 }
 
 static void lamp_off()
 {
     gpio_set_level(static_cast<gpio_num_t>(PIN_LLITZ),   0);
-    ldup_stop();
+    // LDUP not driven — see lamp_on() comment.
     sens_stop();
     gpio_set_level(static_cast<gpio_num_t>(PIN_PHSENSE), 0);
-    log_event("▼  LLITZ OFF  LDUP OFF  PHSENSE OFF");
+    log_event("▼  LLITZ OFF  PHSENSE OFF");
 }
 
 // ---------------------------------------------------------------------------

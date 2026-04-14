@@ -10,16 +10,16 @@
  *   SK01 — 13-pin control PCB connector
  *     PRSV    : hardware pull-up (10 kΩ to V5P0LD) — no GPIO
  *     SENS    : ~120 Hz colour-wheel index pulse (GPIO5, esp_timer)
- *     LDUP    : multi-phase light-output PWM (GPIO8, esp_timer)
+ *     LDUP    : MB OUTPUT — not driven by ESP32 (v1.3 correction; GP8 left as input)
  *     LLITZ   : intensity reference HIGH (GPIO7, driven from Task A)
- *     PHSENSE : photo sense stub ~2.87 V (GPIO10 via resistor divider)
- *     RX0LD   : full UART replay at 19200 baud 8N1 (UART1 TX, GPIO15)
- *     TX0LD   : receive main-board commands (UART1 RX, GPIO16)
+ *     PHSENSE : photo sense stub ~2.87 V (GPIO9 via resistor divider)
+ *     RX0LD   : full UART replay at 19200 baud 8N1 (UART1 TX, GPIO3)
+ *     TX0LD   : receive main-board commands (UART1 RX, GPIO4)
  *
- *   SK05 — 20-pin thermal board (fully removed)
- *     I2C 0x4D : temperature sensor emulation (I2C0 GPIO11/12)
- *     I2C 0x41 : fan controller emulation    (I2C1 GPIO13/14 bridged to GPIO11/12)
- *     I2C 0x54 : EEPROM — original IC kept, wired standalone to GPIO11/12
+ *   SK05 — 20-pin thermal board connector
+ *     I2C 0x4D : temperature sensor emulation (I2C0 GPIO10/12)
+ *     I2C 0x41 : fan controller emulation    (I2C1 GPIO11/13 bridged to GPIO10/12)
+ *     I2C 0x54 : EEPROM — on the main board; no wiring changes needed
  *     FG1/FG2  : fan tachometer outputs driven LOW (GPIO1/2)
  *
  * Build: VS Code PlatformIO → esp32s3 → Build / Upload

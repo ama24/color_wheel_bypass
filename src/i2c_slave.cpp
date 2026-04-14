@@ -11,11 +11,12 @@
 //  I2C0  Wire  GPIO10/12  — address 0x4D  temperature sensor
 //  I2C1  Wire1 GPIO11/13  — address 0x41  fan-speed controller
 //
-//  Hardware bridge required: GPIO10↔GPIO11 and GPIO12↔GPIO13 via jumper wires.
-//  I2C is open-drain so both controllers sharing the physical bus is safe.
+//  Hardware bridge required: GPIO10↔GPIO11 (SDA) and GPIO12↔GPIO13 (SCL)
+//  via dupont jumpers. I2C is open-drain so wire-OR is safe.
 //
-//  0x54 EEPROM: retain original IC, desolder from thermal board and wire
-//  standalone to GPIO11/12 (A0=GND, A1=GND, A2=VCC → address 0x54).
+//  0x54 EEPROM: physically on the MAIN BOARD (confirmed by SK05 disconnection
+//  test — 291 ACKed transactions with thermal cable fully removed). No wiring
+//  changes needed; it stays where it is.
 //
 // ---------------------------------------------------------------------------
 //  0x4D — temperature sensor (4 channels, read via register address)
@@ -34,7 +35,12 @@
 //  0x41 — fan-speed controller (write-only in observed traffic)
 //
 //    Main board writes reg 0x01=0xF8 and reg 0x02=0xF8 every ~2 s.
-//    No read requests observed. Slave ACKs all writes; returns 0x00 on reads.
+//    All observed transactions are writes; no reads. Slave ACKs all writes.
+//
+//    OPEN RISK: what happens when 0x41 NACKs is not yet known. The disconnection
+//    test crashed on 0x4D before the main board ever tried 0x41, so longer-session
+//    behaviour with 0x41 absent is untested. The ESP32 Wire1 slave here ACKs all
+//    writes, removing that risk entirely.
 // ===========================================================================
 
 static const char* TAG = "i2c_slave";
@@ -102,8 +108,8 @@ void i2c_slave_init()
              I2C_TEMP_ADDR, PIN_I2C_SDA, PIN_I2C_SCL);
 
     // I2C1 — fan controller 0x41
-    // GPIO13/14 are bridged to GPIO11/12 via jumper wires so both controllers
-    // share the same physical SK05 I2C bus.
+    // GPIO10↔GPIO11 (SDA) and GPIO12↔GPIO13 (SCL) are bridged via dupont
+    // jumpers so both controllers share the physical SK05 I2C bus.
     Wire1.begin(PIN_I2C1_SDA, PIN_I2C1_SCL, (uint8_t)I2C_PERIPH_ADDR);
     Wire1.onReceive(on_periph_receive);
     Wire1.onRequest(on_periph_request);

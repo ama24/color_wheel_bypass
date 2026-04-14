@@ -62,9 +62,14 @@ void sens_stop()
 }
 
 // ---------------------------------------------------------------------------
-// LDUP — multi-phase light-output PWM
+// LDUP — NOT USED (v1.3 direction correction)
 //
-// Phase table (µs):
+// SK01 pin 10 is a MAIN BOARD OUTPUT (~42 kHz PWM). The functions below are
+// retained for reference but ldup_start() / ldup_stop() are never called.
+// GPIO8 is intentionally left unconfigured (high-impedance input) so it does
+// not conflict with the main board's driver.
+//
+// Original phase table (µs) — reference only:
 //   0: HIGH P0_H  → 1
 //   1: LOW  P1_L  → 2   (one-time start pulse)
 //   2: HIGH P2_H  → 3  ┐
